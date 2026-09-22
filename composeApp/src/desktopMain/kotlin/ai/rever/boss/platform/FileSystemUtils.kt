@@ -41,27 +41,40 @@ object FileSystemUtils {
                 return
             }
 
-            when {
-                osName.contains("mac") -> {
-                    Runtime.getRuntime().exec(arrayOf("open", file.absolutePath))
-                }
-
-                osName.contains("windows") -> {
-                    Runtime.getRuntime().exec(arrayOf("cmd", "/c", "start", "", file.absolutePath))
-                }
-
-                osName.contains("linux") -> {
-                    Runtime.getRuntime().exec(arrayOf("xdg-open", file.absolutePath))
-                }
-
-                else -> {
-                    logger.warn(LogCategory.FILE, "Open file not supported on this OS", mapOf("os" to osName))
-                }
+            val command = openCommandFor(osName, file)
+            if (command == null) {
+                logger.warn(LogCategory.FILE, "Open file not supported on this OS", mapOf("os" to osName))
+                return
             }
+            Runtime.getRuntime().exec(command)
         } catch (e: IOException) {
             logger.warn(LogCategory.FILE, "Failed to open file", error = e)
         }
     }
+
+    /**
+     * Builds the exec argv used to open [file] with the OS default application, or null when
+     * [osName] is not one this function knows how to handle.
+     *
+     * Every branch uses the array form of `exec`, which passes each element straight to the OS
+     * process-creation call with no shell in between. `cmd /c start "" <path>` used to do the
+     * Windows case: `cmd` re-parses the line it is handed, and `&`, `^`, `|`, `<` and `>` in an
+     * unquoted path reach it as command syntax rather than as filename characters (the JDK only
+     * quotes an argument that contains a space or a tab, so an unquoted path split the file open
+     * into two: mangled and lost, then the remainder of the name executed as a command). Routing
+     * through `explorer.exe <path>` instead launches the path's default handler directly, with no
+     * intermediate parser to exploit.
+     */
+    internal fun openCommandFor(
+        osName: String,
+        file: File,
+    ): Array<String>? =
+        when {
+            osName.contains("mac") -> arrayOf("open", file.absolutePath)
+            osName.contains("windows") -> arrayOf("explorer.exe", file.absolutePath)
+            osName.contains("linux") -> arrayOf("xdg-open", file.absolutePath)
+            else -> null
+        }
 
     /**
      * Checks if there is sufficient disk space available for a download.
