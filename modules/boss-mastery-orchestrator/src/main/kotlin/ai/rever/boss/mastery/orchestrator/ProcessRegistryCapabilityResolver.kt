@@ -17,6 +17,13 @@ class ProcessRegistryCapabilityResolver(
         action: String,
         input: Map<String, String>,
     ): Map<String, String> {
+        // Refuse before any dial: a mastery node names its plugin and action from a workflow
+        // definition, not from the manifest this resolver already has for it, so an action that
+        // does not belong to pluginId must be caught here rather than reaching a live gRPC call
+        // to whatever process happens to be registered under that id.
+        processRegistry.findCapability(pluginId, action)
+            ?: throw IllegalStateException("Capability not advertised: $pluginId/$action")
+
         val process =
             processRegistry.getProcess(pluginId)
                 ?: throw IllegalStateException("Process not found: $pluginId")
