@@ -38,11 +38,11 @@ class ProcessRegistryCapabilityResolverTest {
             .addAllCapabilities(actions.map { capability(it) })
             .build()
 
-    private fun registryWithProcess(
+    private fun addProcess(
+        registry: ProcessRegistry,
         pluginId: String,
-        manifest: ProcessManifest,
-    ): ProcessRegistry {
-        val registry = ProcessRegistry()
+        manifest: ProcessManifest?,
+    ) {
         val osProcess = ProcessBuilder(dummyCommand()).start()
         try {
             osProcess.waitFor()
@@ -57,6 +57,14 @@ class ProcessRegistryCapabilityResolverTest {
                 mainClass = "unused.Main",
             )
         registry.register(pluginId, ManagedProcess(config, osProcess, ipcAddress = "unused"), manifest)
+    }
+
+    private fun registryWithProcess(
+        pluginId: String,
+        manifest: ProcessManifest,
+    ): ProcessRegistry {
+        val registry = ProcessRegistry()
+        addProcess(registry, pluginId, manifest)
         return registry
     }
 
@@ -119,9 +127,90 @@ class ProcessRegistryCapabilityResolverTest {
                 }
             // Proves the scope check is not simply refusing everything: an in-scope action
             // clears it and fails later, on the (in this test, absent) IPC client instead.
+            // That later failure is also the strongest proof available in a unit test that no
+            // gRPC dial happens for a refused call: ProcessRegistryCapabilityResolver.invoke
+            // throws on the null ipcClient one line before it ever constructs
+            // CapabilityServiceCoroutineStub, so reaching this exact message - rather than a
+            // channel or RPC-level failure - is only possible if the stub was never built.
             assertTrue(
                 error.message.orEmpty().contains("No IPC client"),
                 "expected the scope check to pass and fail on the missing IPC client, got: ${error.message}",
+            )
+        }
+
+    @Test
+    fun `an action advertised by a different plugin does not clear this plugin's check`() =
+        runBlocking {
+            // Two real capabilities, each registered under its own plugin. A resolver that
+            // checked the action against ANY plugin's manifest - rather than scoping the lookup
+            // to the requested pluginId - would let "flow-tab" borrow "terminal-tab"'s
+            // run_command. findCapability(pluginId, action) already scopes by pluginId; this
+            // pins that behavior against a regression that widens the lookup.
+            val registry = registryWithProcess("terminal-tab", manifestWith("run_command"))
+            addProcess(registry, "flow-tab", manifestWith("compose_message"))
+            val resolver = ProcessRegistryCapabilityResolver(registry)
+
+            val error =
+                assertFailsWith<IllegalStateException> {
+                    resolver.invoke("flow-tab", "run_command", emptyMap())
+                }
+            assertTrue(error.message.orEmpty().contains("Capability not advertised"))
+        }
+
+    @Test
+    fun `matching is exact, not a prefix or substring`() =
+        runBlocking {
+            val registry = registryWithProcess("terminal-tab", manifestWith("run_command"))
+            val resolver = ProcessRegistryCapabilityResolver(registry)
+
+            val error =
+                assertFailsWith<IllegalStateException> {
+                    resolver.invoke("terminal-tab", "run_command_extra", emptyMap())
+                }
+            assertTrue(error.message.orEmpty().contains("Capability not advertised"))
+        }
+
+    @Test
+    fun `a duplicate capability entry in the manifest still resolves the same plugin and action`() =
+        runBlocking {
+            // A manifest listing the same action twice (find() returns the first match) must not
+            // change which pluginId or action the check answers for - it is still one plugin's
+            // own manifest, so there is no cross-plugin shadowing to worry about here.
+            val registry = registryWithProcess("terminal-tab", manifestWith("run_command", "run_command"))
+            val resolver = ProcessRegistryCapabilityResolver(registry)
+
+            val error =
+                assertFailsWith<IllegalStateException> {
+                    resolver.invoke("terminal-tab", "run_command", emptyMap())
+                }
+            assertTrue(error.message.orEmpty().contains("No IPC client"))
+        }
+
+    @Test
+    fun `the check reads the live manifest, not one captured when the resolver was built`() =
+        runBlocking {
+            // ProcessRegistryCapabilityResolver holds only a ProcessRegistry reference, not a
+            // copy of any manifest - this pins that a capability registered AFTER the resolver
+            // was constructed (the real sequence: a plugin process starts, the resolver already
+            // exists, then the process calls back over IPC to register its manifest) is still
+            // honored, and that the reverse - a capability removed from a later re-registration -
+            // is honored too.
+            val registry = registryWithProcess("terminal-tab", manifestWith("run_command"))
+            val resolver = ProcessRegistryCapabilityResolver(registry)
+
+            assertTrue(
+                assertFailsWith<IllegalStateException> {
+                    resolver.invoke("terminal-tab", "open_terminal", emptyMap())
+                }.message.orEmpty().contains("Capability not advertised"),
+            )
+
+            registry.updateManifest("terminal-tab", manifestWith("run_command", "open_terminal"))
+
+            assertTrue(
+                assertFailsWith<IllegalStateException> {
+                    resolver.invoke("terminal-tab", "open_terminal", emptyMap())
+                }.message.orEmpty().contains("No IPC client"),
+                "a capability added after construction must be honored by the same resolver instance",
             )
         }
 }
