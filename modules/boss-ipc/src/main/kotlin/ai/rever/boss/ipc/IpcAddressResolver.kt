@@ -17,6 +17,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 
 /**
  * Resolves IPC addresses for inter-process communication.
@@ -28,6 +29,34 @@ import java.util.concurrent.ConcurrentHashMap
  */
 object IpcAddressResolver {
     private val logger = LoggerFactory.getLogger(IpcAddressResolver::class.java)
+
+    /**
+     * Authentication proves who is calling; it does not stop a well-formed-but-abusive local
+     * peer from exhausting the other side with well-formed traffic. Every process on the
+     * machine can open a socket to the kernel endpoint (and every child can be handed a
+     * malicious response by whatever it thinks the kernel is), so both builders apply the
+     * same three caps regardless of direction:
+     *
+     * - [maxInboundMessageBytes]: gRPC/Netty already refuses a frame whose declared length
+     *   exceeds this before buffering it, so a single oversized message never has to be read
+     *   to completion to be rejected. Sized well above the largest legitimate payload this IPC
+     *   carries today (a full-page screenshot, base64-encoded, inside a capability result) with
+     *   headroom, while still being a hard ceiling rather than no ceiling at all.
+     * - [MAX_CONCURRENT_STREAMS_PER_CONNECTION]: bounds how many RPCs one connection can have
+     *   in flight at once, so one peer cannot pin unbounded concurrent streams against the
+     *   other side.
+     * - [MAX_CONNECTION_IDLE_MS]: a connection that stops being used - the far end died without
+     *   closing cleanly, or is holding the socket open for no reason - is dropped rather than
+     *   holding its slot forever. Comfortably longer than the default heartbeat interval
+     *   ([ai.rever.boss.process.ProcessConfig.heartbeatIntervalMs]) so a live, quiet connection
+     *   is never mistaken for an abandoned one.
+     */
+    // `internal var`, not `private const val`: IpcTransportLimitsTest shrinks
+    // maxInboundMessageBytes to exercise the cap end-to-end with a small payload instead of a
+    // real 64MB message, restoring the default afterward.
+    internal var maxInboundMessageBytes = 64 * 1024 * 1024
+    private const val MAX_CONCURRENT_STREAMS_PER_CONNECTION = 256
+    private val MAX_CONNECTION_IDLE_MS = TimeUnit.MINUTES.toMillis(5)
 
     private val isWindows = System.getProperty("os.name").lowercase().contains("win")
     private val isMacOS = System.getProperty("os.name").lowercase().contains("mac")
@@ -137,44 +166,49 @@ object IpcAddressResolver {
      */
     fun configureServerBuilder(address: String): NettyServerBuilder {
         val parsed = parseAddress(address)
-        return when (parsed) {
-            is DomainSocketAddress -> {
-                // Clean up stale socket file
-                File(parsed.path()).delete()
+        val builder =
+            when (parsed) {
+                is DomainSocketAddress -> {
+                    // Clean up stale socket file
+                    File(parsed.path()).delete()
 
-                when {
-                    isMacOS -> {
-                        NettyServerBuilder
-                            .forAddress(parsed)
-                            .channelType(KQueueServerDomainSocketChannel::class.java)
-                            .bossEventLoopGroup(KQueueEventLoopGroup(1))
-                            .workerEventLoopGroup(KQueueEventLoopGroup())
-                    }
+                    when {
+                        isMacOS -> {
+                            NettyServerBuilder
+                                .forAddress(parsed)
+                                .channelType(KQueueServerDomainSocketChannel::class.java)
+                                .bossEventLoopGroup(KQueueEventLoopGroup(1))
+                                .workerEventLoopGroup(KQueueEventLoopGroup())
+                        }
 
-                    isLinux -> {
-                        NettyServerBuilder
-                            .forAddress(parsed)
-                            .channelType(EpollServerDomainSocketChannel::class.java)
-                            .bossEventLoopGroup(EpollEventLoopGroup(1))
-                            .workerEventLoopGroup(EpollEventLoopGroup())
-                    }
+                        isLinux -> {
+                            NettyServerBuilder
+                                .forAddress(parsed)
+                                .channelType(EpollServerDomainSocketChannel::class.java)
+                                .bossEventLoopGroup(EpollEventLoopGroup(1))
+                                .workerEventLoopGroup(EpollEventLoopGroup())
+                        }
 
-                    else -> {
-                        throw UnsupportedOperationException(
-                            "Unix domain sockets not supported on this platform",
-                        )
+                        else -> {
+                            throw UnsupportedOperationException(
+                                "Unix domain sockets not supported on this platform",
+                            )
+                        }
                     }
                 }
-            }
 
-            is InetSocketAddress -> {
-                NettyServerBuilder.forAddress(parsed)
-            }
+                is InetSocketAddress -> {
+                    NettyServerBuilder.forAddress(parsed)
+                }
 
-            else -> {
-                throw IllegalArgumentException("Unknown address type: $parsed")
+                else -> {
+                    throw IllegalArgumentException("Unknown address type: $parsed")
+                }
             }
-        }
+        return builder
+            .maxInboundMessageSize(maxInboundMessageBytes)
+            .maxConcurrentCallsPerConnection(MAX_CONCURRENT_STREAMS_PER_CONNECTION)
+            .maxConnectionIdle(MAX_CONNECTION_IDLE_MS, TimeUnit.MILLISECONDS)
     }
 
     /**
@@ -182,39 +216,43 @@ object IpcAddressResolver {
      */
     fun configureChannelBuilder(address: String): NettyChannelBuilder {
         val parsed = parseAddress(address)
-        return when (parsed) {
-            is DomainSocketAddress -> {
-                when {
-                    isMacOS -> {
-                        NettyChannelBuilder
-                            .forAddress(parsed)
-                            .channelType(KQueueDomainSocketChannel::class.java)
-                            .eventLoopGroup(KQueueEventLoopGroup())
-                    }
+        val builder =
+            when (parsed) {
+                is DomainSocketAddress -> {
+                    when {
+                        isMacOS -> {
+                            NettyChannelBuilder
+                                .forAddress(parsed)
+                                .channelType(KQueueDomainSocketChannel::class.java)
+                                .eventLoopGroup(KQueueEventLoopGroup())
+                        }
 
-                    isLinux -> {
-                        NettyChannelBuilder
-                            .forAddress(parsed)
-                            .channelType(EpollDomainSocketChannel::class.java)
-                            .eventLoopGroup(EpollEventLoopGroup())
-                    }
+                        isLinux -> {
+                            NettyChannelBuilder
+                                .forAddress(parsed)
+                                .channelType(EpollDomainSocketChannel::class.java)
+                                .eventLoopGroup(EpollEventLoopGroup())
+                        }
 
-                    else -> {
-                        throw UnsupportedOperationException(
-                            "Unix domain sockets not supported on this platform",
-                        )
+                        else -> {
+                            throw UnsupportedOperationException(
+                                "Unix domain sockets not supported on this platform",
+                            )
+                        }
                     }
                 }
-            }
 
-            is InetSocketAddress -> {
-                NettyChannelBuilder.forAddress(parsed)
-            }
+                is InetSocketAddress -> {
+                    NettyChannelBuilder.forAddress(parsed)
+                }
 
-            else -> {
-                throw IllegalArgumentException("Unknown address type: $parsed")
+                else -> {
+                    throw IllegalArgumentException("Unknown address type: $parsed")
+                }
             }
-        }
+        // Same cap as the server, in reverse: a compromised or misbehaving kernel handing a
+        // child an oversized response must not be read to completion by the child either.
+        return builder.maxInboundMessageSize(maxInboundMessageBytes)
     }
 
     /**
