@@ -51,7 +51,7 @@ object ChromiumAutoDownloader {
      * Chromium build has on the order of ten thousand entries and extracts to a few hundred
      * MB, so both limits sit well above any legitimate archive while still refusing one that
      * declares a modest central directory but streams unbounded bytes, or one padded with an
-     * unreasonable number of entries to exhaust file handles/inodes.
+     * unreasonable number of entries to exhaust inodes.
      *
      * Constants, not mutable state: a test passes smaller limits as arguments, and nothing at
      * runtime can loosen the ones production uses.
@@ -928,9 +928,14 @@ object ChromiumAutoDownloader {
      * What the entry named [name] costs before any content: its path bytes plus
      * [PATH_COMPONENT_COST_BYTES] for each component, since each one can create a directory or
      * file. Read from the name alone, so nothing the archive declares about sizes is trusted.
+     *
+     * Both `/` and `\` separate components. Extraction runs on Windows, where a backslash in an
+     * entry name is a path separator to the filesystem, so counting only `/` would charge a
+     * `a\b\c\d` name as one component while it creates three directories. On Linux a backslash
+     * is an ordinary filename character, so this can only overcharge, which is the safe side of a cap.
      */
     internal fun entryOverheadBytes(name: String): Long {
-        val components = name.split('/').count { it.isNotEmpty() }
+        val components = name.split('/', '\\').count { it.isNotEmpty() }
         return name.toByteArray(Charsets.UTF_8).size + components * PATH_COMPONENT_COST_BYTES
     }
 

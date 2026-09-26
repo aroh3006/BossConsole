@@ -183,6 +183,37 @@ class ChromiumExtractionLimitsTest {
     }
 
     @Test
+    fun `backslash separators count as path components, so a Windows-style path cannot dodge the depth charge`() {
+        val slashed = "a/b/c/d.bin"
+        val backslashed = "a\\b\\c\\d.bin"
+
+        assertEquals(overhead(slashed), overhead(backslashed))
+        assertEquals(
+            backslashed.length + 4 * ChromiumAutoDownloader.PATH_COMPONENT_COST_BYTES,
+            overhead(backslashed),
+        )
+        assertEquals(overhead("a/b/c/d/"), overhead("a\\b\\c\\d\\"))
+        assertEquals(overhead("a/b\\c/d"), overhead("a/b/c/d"))
+    }
+
+    @Test
+    fun `an archive of deep backslash paths is refused by the budget before anything is created`() {
+        val first = "one\\two\\three\\file.bin"
+        val second = "four\\five\\six\\file.bin"
+        val zipPath = zipOf(first to ByteArray(0), second to ByteArray(0))
+        val target = targetDirFor(zipPath)
+        // Room for one four-component entry and its path bytes, but not for two. Counting a
+        // backslash path as a single component would let both through.
+        val budget = 4 * ChromiumAutoDownloader.PATH_COMPONENT_COST_BYTES + 200
+
+        assertFailsWith<SecurityException> {
+            ChromiumAutoDownloader.extractWithJava(zipPath, target, maxBytes = budget)
+        }
+        // The second entry is the one that tips the budget, so nothing of it may exist.
+        assertFalse(target.resolve("four").exists())
+    }
+
+    @Test
     fun `an entry resolving outside the target directory is still refused (zip-slip)`() {
         val zipPath = zipOf("../escape.txt" to "gotcha".toByteArray())
         val target = targetDirFor(zipPath)
