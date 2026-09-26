@@ -8,7 +8,9 @@ import java.io.File
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /**
  * The production decision behind a pack's rule writes: the stamp [DesktopPluginPackEffects] takes at
@@ -104,6 +106,69 @@ class DesktopPluginPackEffectsRuleTest {
         val snapshot = runBlocking { effects.snapshot(PluginPack("team", emptyList(), listOf(allowTool))) }
 
         assertEquals(McpPolicyAction.DENY, snapshot.toolRules["example_tool"])
+    }
+
+    @Test
+    fun `an ALLOW for a tool no plugin provides is not written name-wide`() {
+        // Two plugins ship run_command. One has an operator DENY. Nothing registered the tool
+        // when the snapshot was taken or when the rule is written, so the pack cannot say which
+        // plugin the ALLOW is for.
+        val policy = engine()
+        policy.setToolPolicy("run_command", McpPolicyAction.DENY, providerId = "com.other")
+        val effects = effects(policy)
+        val rule = PackRule(PackRuleScope.TOOL, "run_command", McpPolicyAction.ALLOW)
+        val stamp = stampOf(effects, rule)
+        assertNull(stamp.providerId)
+
+        val result = effects.addRule(rule, stamp)
+
+        assertNotEquals(RuleWrite.ADDED, result)
+        // No name-wide rule was created, so a plugin nobody approved is still asked.
+        assertTrue(
+            policy.config.value.rules
+                .isEmpty(),
+        )
+        assertEquals(McpPolicyAction.ASK, policy.policyFor("run_command", "com.third"))
+        // The other plugin's DENY is untouched.
+        assertEquals(McpPolicyAction.DENY, policy.policyFor("run_command", "com.other"))
+    }
+
+    @Test
+    fun `that ALLOW is reported as unresolved, not as added`() {
+        val policy = engine()
+        val effects = effects(policy)
+        val rule = PackRule(PackRuleScope.TOOL, "run_command", McpPolicyAction.ALLOW)
+
+        assertEquals(RuleWrite.PROVIDER_UNRESOLVED, effects.addRule(rule, stampOf(effects, rule)))
+    }
+
+    @Test
+    fun `a DENY for a tool no plugin provides is still written, since a name-wide DENY only tightens`() {
+        val policy = engine()
+        val effects = effects(policy)
+        val rule = PackRule(PackRuleScope.TOOL, "run_command", McpPolicyAction.DENY)
+
+        assertEquals(RuleWrite.ADDED, effects.addRule(rule, stampOf(effects, rule)))
+        assertEquals(McpPolicyAction.DENY, policy.policyFor("run_command", "com.any"))
+    }
+
+    @Test
+    fun `an ALLOW whose plugin resolves is saved for that plugin only`() {
+        registered["run_command"] = "com.example"
+        val policy = engine()
+        policy.setToolPolicy("run_command", McpPolicyAction.DENY, providerId = "com.other")
+        val effects = effects(policy)
+        val rule = PackRule(PackRuleScope.TOOL, "run_command", McpPolicyAction.ALLOW)
+
+        assertEquals(RuleWrite.ADDED, effects.addRule(rule, stampOf(effects, rule)))
+
+        assertEquals(McpPolicyAction.ALLOW, policy.policyFor("run_command", "com.example"))
+        assertEquals(McpPolicyAction.DENY, policy.policyFor("run_command", "com.other"))
+        assertEquals(McpPolicyAction.ASK, policy.policyFor("run_command", "com.third"))
+        assertTrue(
+            policy.config.value.rules
+                .isEmpty(),
+        )
     }
 
     @Test

@@ -204,24 +204,14 @@ class DesktopPluginPackEffects(
         // installs, so the tool of a plugin this pack just installed has a provider now that it
         // did not have when the snapshot was taken - and a DENY on that provider must be seen.
         val providerId = if (rule.scope == PackRuleScope.TOOL) providerOf(rule.subject) ?: stamp.providerId else null
-        val outcome =
-            when (rule.scope) {
-                PackRuleScope.TOOL -> {
-                    val expected = policy.expectedToolRevocation(stamp, providerId)
-                    policy.setToolPolicyIfAbsent(rule.subject, rule.action, expected, providerId)
-                }
 
-                PackRuleScope.PROVIDER -> {
-                    policy.setProviderPolicyIfAbsent(rule.subject, rule.action, stamp.revocation)
-                }
-            }
-        return when (outcome) {
-            McpProactivePolicyOutcome.Saved -> RuleWrite.ADDED
-            McpProactivePolicyOutcome.Refused -> RuleWrite.KEPT_EXISTING
-            McpProactivePolicyOutcome.Denied -> policy.deniedCause(providerId)
-            McpProactivePolicyOutcome.PolicyUnreadable -> RuleWrite.POLICY_UNREADABLE
-            is McpProactivePolicyOutcome.Failed -> RuleWrite.NOT_SAVED
-        }
+        // Tool rules are stored per plugin. With no plugin to store an ALLOW under, the engine
+        // would write the name-wide slot, which grants every plugin that ships a tool of this
+        // name. Refuse instead. A DENY or ASK is not held back: a name-wide one can only make
+        // calls stricter, and the operator asked for it.
+        val unresolvedAllow =
+            rule.scope == PackRuleScope.TOOL && providerId == null && rule.action == McpPolicyAction.ALLOW
+        return if (unresolvedAllow) RuleWrite.PROVIDER_UNRESOLVED else policy.writeRule(rule, stamp, providerId)
     }
 
     private suspend fun listingFor(
@@ -332,6 +322,32 @@ private fun McpPolicyEngine.expectedToolRevocation(
             else -> providerRevocationVersion(providerId)
         }
     return stamp.revocation + provider
+}
+
+/** Writes [rule] through the engine's add-only-if-absent path and names what happened. */
+private fun McpPolicyEngine.writeRule(
+    rule: PackRule,
+    stamp: RuleStamp,
+    providerId: String?,
+): RuleWrite {
+    val outcome =
+        when (rule.scope) {
+            PackRuleScope.TOOL -> {
+                val expected = expectedToolRevocation(stamp, providerId)
+                setToolPolicyIfAbsent(rule.subject, rule.action, expected, providerId)
+            }
+
+            PackRuleScope.PROVIDER -> {
+                setProviderPolicyIfAbsent(rule.subject, rule.action, stamp.revocation)
+            }
+        }
+    return when (outcome) {
+        McpProactivePolicyOutcome.Saved -> RuleWrite.ADDED
+        McpProactivePolicyOutcome.Refused -> RuleWrite.KEPT_EXISTING
+        McpProactivePolicyOutcome.Denied -> deniedCause(providerId)
+        McpProactivePolicyOutcome.PolicyUnreadable -> RuleWrite.POLICY_UNREADABLE
+        is McpProactivePolicyOutcome.Failed -> RuleWrite.NOT_SAVED
+    }
 }
 
 /**

@@ -202,6 +202,7 @@ internal object PluginPackJson {
                                     put("subject", row.step.rule.subject)
                                     put("action", row.step.rule.action.name)
                                     put("result", row.kind.name.lowercase())
+                                    row.kind.reason()?.let { put("reason", it) }
                                     row.step.existing?.let { put("existing", it.name) }
                                 },
                             )

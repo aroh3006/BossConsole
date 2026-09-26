@@ -214,4 +214,28 @@ class PluginPackConsentTest {
 
         assertEquals(RuleResultKind.ADDED, result.rules.single().kind)
     }
+
+    // 5. A tool rule that cannot be tied to a plugin is not reported as applied.
+
+    @Test
+    fun `an unresolved tool ALLOW is reported with a reason and counts as a miss`() {
+        val effects = FakePackEffects()
+        effects.ruleWrites["example_tool"] = RuleWrite.PROVIDER_UNRESOLVED
+
+        val result =
+            applyPack(
+                effects,
+                rules = listOf(PackRule(PackRuleScope.TOOL, "example_tool", McpPolicyAction.ALLOW)),
+            )
+
+        assertEquals(RuleResultKind.PROVIDER_UNRESOLVED, result.rules.single().kind)
+        assertEquals(PackApplyStatus.FAILED, result.status, "the pack did not get the rule it asked for")
+        assertTrue(
+            RuleResultKind.PROVIDER_UNRESOLVED
+                .reason()
+                .orEmpty()
+                .contains("not saved"),
+        )
+        assertEquals(null, RuleResultKind.ADDED.reason())
+    }
 }

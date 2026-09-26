@@ -35,6 +35,13 @@ enum class RuleWrite {
      * authorization the write is carrying is stale. Refused rather than applied.
      */
     REVOKED_SINCE_APPROVAL,
+
+    /**
+     * A tool ALLOW whose plugin could not be identified when it was written. Tool rules are stored
+     * per plugin, so the only way to save this one would be a name-wide rule that also answers for
+     * every other plugin shipping a tool of that name. Not saved.
+     */
+    PROVIDER_UNRESOLVED,
 }
 
 /**
@@ -111,7 +118,35 @@ enum class RuleResultKind {
 
     /** The operator reset this subject after approving the pack, so the write was refused. */
     REVOKED_SINCE_APPROVAL,
+
+    /** The rule was not saved because no plugin provided the tool, so it could not be scoped to one. */
+    PROVIDER_UNRESOLVED,
 }
+
+private fun RuleWrite.toResultKind(): RuleResultKind =
+    when (this) {
+        RuleWrite.ADDED -> RuleResultKind.ADDED
+        RuleWrite.KEPT_EXISTING -> RuleResultKind.KEPT_EXISTING
+        RuleWrite.POLICY_UNREADABLE -> RuleResultKind.POLICY_UNREADABLE
+        RuleWrite.NOT_SAVED -> RuleResultKind.NOT_SAVED
+        RuleWrite.DENIED_BY_PROVIDER -> RuleResultKind.DENIED_BY_PROVIDER
+        RuleWrite.DENIED_BY_POLICY -> RuleResultKind.DENIED_BY_POLICY
+        RuleWrite.REVOKED_SINCE_APPROVAL -> RuleResultKind.REVOKED_SINCE_APPROVAL
+        RuleWrite.PROVIDER_UNRESOLVED -> RuleResultKind.PROVIDER_UNRESOLVED
+    }
+
+/** Why a rule did not land, in words for the operator, or null when the kind needs no explanation. */
+fun RuleResultKind.reason(): String? =
+    when (this) {
+        RuleResultKind.PROVIDER_UNRESOLVED -> {
+            "No installed plugin provides this tool, so the rule was not saved. " +
+                "A tool rule is only saved for the plugin that provides it."
+        }
+
+        else -> {
+            null
+        }
+    }
 
 data class RuleResult(
     val step: RuleStep,
@@ -251,15 +286,7 @@ class PluginPackApplier(
                     // The stamp the plan was computed from, not one read at write time: the
                     // whole point is to notice a reset that happened in between.
                     val stamp = snapshot.stamps[step.rule.subject] ?: RuleStamp(revocation = 0L, providerId = null)
-                    when (effects.addRule(step.rule, stamp)) {
-                        RuleWrite.ADDED -> RuleResultKind.ADDED
-                        RuleWrite.KEPT_EXISTING -> RuleResultKind.KEPT_EXISTING
-                        RuleWrite.POLICY_UNREADABLE -> RuleResultKind.POLICY_UNREADABLE
-                        RuleWrite.NOT_SAVED -> RuleResultKind.NOT_SAVED
-                        RuleWrite.DENIED_BY_PROVIDER -> RuleResultKind.DENIED_BY_PROVIDER
-                        RuleWrite.DENIED_BY_POLICY -> RuleResultKind.DENIED_BY_POLICY
-                        RuleWrite.REVOKED_SINCE_APPROVAL -> RuleResultKind.REVOKED_SINCE_APPROVAL
-                    }
+                    effects.addRule(step.rule, stamp).toResultKind()
                 }
             }
         return RuleResult(step, kind)
@@ -299,6 +326,7 @@ class PluginPackApplier(
                 RuleResultKind.NOT_SAVED,
                 RuleResultKind.DENIED_BY_PROVIDER,
                 RuleResultKind.DENIED_BY_POLICY,
+                RuleResultKind.PROVIDER_UNRESOLVED,
             )
         return this in missed
     }
