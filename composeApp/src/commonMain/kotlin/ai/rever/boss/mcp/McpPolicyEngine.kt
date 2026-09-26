@@ -675,8 +675,12 @@ class McpPolicyEngine(
     /**
      * The operator-facing undo for [setToolPolicy]'s persistent scope: removes one rule entirely,
      * the one [providerId] holds for [toolName], or with no [providerId] the unscoped name-wide
-     * one. It never touches a rule belonging to a different provider. so the next call falls through to whatever [McpToolPolicyConfig.defaultMutatingAction]
-     * / `defaultReadOnlyAction` actually say - not to a hardcoded ASK.
+     * one. It never touches a rule belonging to a different provider. Once the rule is gone the
+     * next call falls through to whatever [McpToolPolicyConfig.defaultMutatingAction] /
+     * `defaultReadOnlyAction` actually say - not to a hardcoded ASK.
+     *
+     * The revocation counter is per tool name, so a reset also invalidates queued approvals for
+     * every plugin's same-named tool. That over-invalidates on purpose, the fail-closed direction.
      *
      * **Removes the key rather than rewriting it to ASK.** An earlier version did the latter by
      * calling `setToolPolicy(toolName, ASK)`, which - because [setToolPolicy] always writes
